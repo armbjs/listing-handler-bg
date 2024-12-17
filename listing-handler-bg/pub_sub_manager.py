@@ -11,6 +11,9 @@ import decimal
 import logging
 import math
 
+import http.client  # ==== 알림 기능 추가 시작 ====
+import urllib        # ==== 알림 기능 추가 끝 ====
+
 import dotenv
 
 if __package__ == None or __package__ == '':
@@ -139,6 +142,39 @@ class TradingAgent:
         balance_dict = self.get_filtered_amount_dict_in_bg_spot()
         self.send_messsage_to_telegram(f"TA 시작: {balance_dict}")
 
+    # ==== 알림 기능 추가 시작 ====
+    def send_pushover_notification(self, title, message):
+        HOST = "api.pushover.net:443"
+        ENDPOINT = "/1/messages.json"
+        APP_TOKEN = "abgdqz5qszbtve26nfxgdgcn2viy9z"
+        USER_KEY = "u33mp5n17yesssku41o2e56cqezonq"
+
+        params = {
+            "token": APP_TOKEN,
+            "user": USER_KEY,
+            "message": message,
+            "title": title,
+            "sound": "tornado_siren",
+            "priority": 1,
+            "device": "bjs",
+            "expire": 3600,
+            "retry": 60
+        }
+
+        try:
+            conn = http.client.HTTPSConnection(HOST)
+            conn.request("POST", ENDPOINT, urllib.parse.urlencode(params),
+                         {"Content-type": "application/x-www-form-urlencoded"})
+            response = conn.getresponse()
+            resp_data = response.read().decode('utf-8', errors='replace')
+            if response.status == 200:
+                print(f"🚨 Alert sent successfully! Response: {resp_data}")
+            else:
+                print(f"⚠️ Failed to send alert: {resp_data}")
+        except Exception as e:
+            print(f"⚠️ An error occurred while sending alert: {e}")
+    # ==== 알림 기능 추가 끝 ====
+
     def send_messsage_to_telegram(self, msg):
         now_dt = datetime.datetime.now(tz=pytz.timezone("Asia/Seoul"))
         now_dt_str = now_dt.isoformat()
@@ -245,19 +281,17 @@ class TradingAgent:
         return filtered_dict
 
     # ==== 변경 부분 시작 ====
-    # buy_market_order_in_bybit_spot -> buy_market_order_in_bg_spot
-    # Bybit 시장가 매수 로직을 BG로 대체
     def buy_market_order_in_bg_spot(self, order_currency, payment_currency, value_in_payment_currency):
+        # 잔고 확인 로직 전부 제거
         usdt_to_use = float(value_in_payment_currency)
         usdt_to_use = math.floor(usdt_to_use * 100) / 100.0
-        if usdt_to_use <= 0:
-            return ""
-        qty_str = f"{usdt_to_use:.2f}"
 
+        # 잔고가 0 이하이거나 상관없이 바로 주문
+        qty_str = f"{usdt_to_use:.2f}"
         symbol = f"{order_currency}{payment_currency}"
-        # 시장가 매수 시 BG테스트 코드와 동일하게 size는 quote 자산 수량(USDT)
         order_resp = self.place_spot_order(symbol, "buy", "market", "fok", qty_str)
         return str(order_resp)
+
     # ==== 변경 부분 끝 ====
 
     def message_handler(self, message: dict):
@@ -300,16 +334,28 @@ class TradingAgent:
             print("order_currency_list", order_currency_list)
             
             result_list = []
+            filled_coins = []  # ==== 알림 기능 추가 ====
+
             for this_oc in order_currency_list:
                 try:
-                    # ==== 변경 부분 시작 ====
-                    # bybit -> bg 로 매수 로직 변경
                     result = self.buy_market_order_in_bg_spot(this_oc, 'USDT', usdt_amount_in_spot_wallet)
-                    # ==== 변경 부분 끝 ====
+                    # ==== 알림 기능 추가 시작 ====
+                    # Bitget 주문 성공 시 '00000' 코드가 응답에 포함됨
+                    if '00000' in result:
+                        filled_coins.append(this_oc)
+                    # ==== 알림 기능 추가 끝 ====
                 except Exception as inner_e:
                     result = f"\n\n{this_oc} exception occurred. inner_e: {inner_e} skipped...\n\n"
 
                 result_list.append(result)
+            print('filled_coins',filled_coins)
+            # ==== 알림 기능 추가 시작 ====
+            if len(filled_coins) > 0:
+                filled_coins_str = ", ".join(filled_coins)
+                alert_msg = f"🚨⚠️ 매수 성공 - 공지사항: {notice_title}\n매수 완료 코인: {filled_coins_str} 🚨⚠️"
+                self.send_pushover_notification("매수 알림", alert_msg)
+            # ==== 알림 기능 추가 끝 ====
+
             print("result_list", result_list)
             result_str = "\n".join(result_list)
             self.send_messsage_to_telegram(result_str)
