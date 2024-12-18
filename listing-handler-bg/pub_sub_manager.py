@@ -32,6 +32,8 @@ import requests
 from urllib.parse import urlencode
 # ==== 변경 부분 끝 ====
 
+PUBSUB_CHANNEL_NAME = f"CF_NEW_NOTICES"
+
 
 env_file_path = pathlib.Path(__file__).parent.parent / ".env"
 print("env_file_path", env_file_path)
@@ -175,7 +177,8 @@ class TradingAgent:
             print(f"⚠️ An error occurred while sending alert: {e}")
     # ==== 알림 기능 추가 끝 ====
 
-    def send_messsage_to_telegram(self, msg):
+    # transaction 인자를 추가하여, True일 경우 다른 Redis Stream으로 메시지를 보냄
+    def send_messsage_to_telegram(self, msg, transaction=False):
         now_dt = datetime.datetime.now(tz=pytz.timezone("Asia/Seoul"))
         now_dt_str = now_dt.isoformat()
         notice_data = {
@@ -183,7 +186,10 @@ class TradingAgent:
                 "time": now_dt_str,
                 "message": f"{self.INSTANCE_NAME}\n{msg}\n"
         }
-        self.telegram_redis_client._execute_xadd("NOTICE_STREAM:RUA_UB_BN_LISTING", value_dict=notice_data)
+
+        # transaction=True면 NOTICE_STREAM:RUA_UB_BN_LISTING_TRANSACTION, 아니면 기존 NOTICE_STREAM:RUA_UB_BN_LISTING
+        stream_name = "NOTICE_STREAM:RUA_UB_BN_LISTING_TRANSACTION" if transaction else "NOTICE_STREAM:RUA_UB_BN_LISTING"
+        self.telegram_redis_client._execute_xadd(stream_name, value_dict=notice_data)
 
     # ==== 변경 부분 시작 ====
     # Bybit 잔고 조회 -> BG 잔고 조회 함수로 대체
@@ -339,26 +345,41 @@ class TradingAgent:
             for this_oc in order_currency_list:
                 try:
                     result = self.buy_market_order_in_bg_spot(this_oc, 'USDT', usdt_amount_in_spot_wallet)
-                    # ==== 알림 기능 추가 시작 ====
-                    # Bitget 주문 성공 시 '00000' 코드가 응답에 포함됨
+                    # 체결 성공 판별 (BG API 성공 시 '00000' 코드 포함)
                     if '00000' in result:
                         filled_coins.append(this_oc)
-                    # ==== 알림 기능 추가 끝 ====
+                    result_list.append(result)
                 except Exception as inner_e:
                     result = f"\n\n{this_oc} exception occurred. inner_e: {inner_e} skipped...\n\n"
+                    result_list.append(result)
 
-                result_list.append(result)
-            print('filled_coins',filled_coins)
-            # ==== 알림 기능 추가 시작 ====
+            # 매수 성공 시 알림
             if len(filled_coins) > 0:
                 filled_coins_str = ", ".join(filled_coins)
                 alert_msg = f"🚨⚠️ 매수 성공 - 공지사항: {notice_title}\n매수 완료 코인: {filled_coins_str} 🚨⚠️"
                 self.send_pushover_notification("매수 알림", alert_msg)
-            # ==== 알림 기능 추가 끝 ====
 
             print("result_list", result_list)
             result_str = "\n".join(result_list)
             self.send_messsage_to_telegram(result_str)
+
+            # 여기서 체결 관련 메시지를 별도 transaction 스트림으로도 전송
+            transaction_msgs = []
+            for item in result_list:
+                if '00000' in item:
+                    # 체결 성공
+                    transaction_msgs.append(f"✅ 매수 체결 데이터: {item}")
+                elif "exception occurred." in item:
+                    # 예외 발생 시 raw 데이터 출력
+                    transaction_msgs.append(f"❌ 매수 실패(예외 발생) 데이터: {item}")
+                else:
+                    # '00000' 아님 = 실패. 여기서도 raw 데이터 그대로 출력
+                    transaction_msgs.append(f"❌ 매수 실패 데이터: {item}")
+
+            if transaction_msgs:
+                transaction_str = "\n".join(transaction_msgs)
+                self.send_messsage_to_telegram(transaction_str, transaction=True)
+
             self.update_amount_dict_in_bybit_spot()
 
         except Exception as e:
@@ -430,9 +451,22 @@ if __name__ == '__main__':
     ta = TradingAgent(BG_API_KEY, BG_SECRET_KEY, telegram_redis_client, INSTANCE_NAME)
     # ==== 변경 부분 끝 ====
 
-    redis_publish_channel_key_name = f"CF_NEW_NOTICES"
+    redis_publish_channel_key_name = PUBSUB_CHANNEL_NAME
     psm.prepare_pubsub(ta.message_handler)
     psm.subscribe(redis_publish_channel_key_name)
+
+    # ==== 변경 부분 시작 ====
+    if PUBSUB_CHANNEL_NAME != "CF_NEW_NOTICES":
+        def warning_sender():
+            while True:
+                warning_msg = f"PUBSUB_CHANNEL_NAME가 'CF_NEW_NOTICES'가 아닌 '{PUBSUB_CHANNEL_NAME}'로 설정되어 있습니다. TEST 환경인지 확인하세요!"
+                ta.send_messsage_to_telegram(warning_msg)
+                time.sleep(30)
+
+        warning_thread = threading.Thread(target=warning_sender)
+        warning_thread.daemon = True
+        warning_thread.start()
+# ==== 변경 부분 끝 ====
 
     i = 0
     while True:
