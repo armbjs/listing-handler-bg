@@ -145,6 +145,15 @@ class TradingAgent:
 
         balance_dict = self.get_filtered_amount_dict_in_bg_spot()
         self.send_messsage_to_telegram(f"TA 시작: {balance_dict}")
+        self.purchased_orders = []
+
+    def is_order_purchased(self, order_currency, exchange):
+        """주어진 order_currency와 exchange가 이미 구매되었는지 확인"""
+        return (order_currency, exchange) in self.purchased_orders
+
+    def add_purchased_order(self, order_currency, exchange):
+        """주어진 order_currency와 exchange를 purchased_orders 리스트에 추가"""
+        self.purchased_orders.append((order_currency, exchange))
 
     # ==== 알림 기능 추가 시작 ====
     def send_pushover_notification(self, title, message):
@@ -347,11 +356,16 @@ class TradingAgent:
             filled_coins = []  # ==== 알림 기능 추가 ====
 
             for this_oc in order_currency_list:
+                if self.is_order_purchased(this_oc, notice_exchange):
+                    warning_msg = f"🔔 중복 구매 방지: {this_oc}는 이미 {notice_exchange}에서 구매되었습니다."
+                    self.send_messsage_to_telegram(warning_msg, transaction=True)
+                    continue  # 이미 구매한 경우 건너뜀
                 try:
                     result = self.buy_market_order_in_bg_spot(this_oc, 'USDT', usdt_amount_in_spot_wallet)
                     # 체결 성공 판별 (BG API 성공 시 '00000' 코드 포함)
                     if '00000' in result:
                         filled_coins.append(this_oc)
+                        self.add_purchased_order(this_oc, notice_exchange)  # 구매 성공 시 리스트에 추가
                     result_list.append(result)
                 except Exception as inner_e:
                     result = f"\n\n{this_oc} exception occurred. inner_e: {inner_e} skipped...\n\n"
@@ -372,7 +386,7 @@ class TradingAgent:
             for item in result_list:
                 if '00000' in item:
                     # 체결 성공
-                    transaction_msgs.append(f"✅ 매수 체결 데이터: {item}")
+                    transaction_msgs.append(f"✅ 매수 체결 데이터: {item}, purchased_order_currency: {self.purchased_orders}")
                 elif "exception occurred." in item:
                     # 예외 발생 시 raw 데이터 출력
                     transaction_msgs.append(f"❌ 매수 실패(예외 발생) 데이터: {item}")
@@ -481,6 +495,7 @@ if __name__ == '__main__':
 
             if i % 3600 == 0:            
                 ta.send_messsage_to_telegram(f"현재 SPOT balance: {balance_dict}")
+                ta.send_messsage_to_telegram(f"purchased_order_currency_list: {ta.purchased_orders}")
 
         time.sleep(1)
         i += 1
